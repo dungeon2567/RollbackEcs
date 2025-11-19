@@ -51,6 +51,7 @@ struct SystemInput {
     view_args: Vec<ViewArg>,
     all_types: Vec<Type>,
     none_types: Vec<Type>,
+    any_types: Vec<Type>,
     body: Block,
 }
 
@@ -77,6 +78,7 @@ impl Parse for SystemInput {
         let view_args = parse_view_args(&args_paren)?;
         let mut all_types = Vec::new();
         let mut none_types = Vec::new();
+        let mut any_types = Vec::new();
         while inner.peek(Ident) {
             let kw: Ident = inner.parse()?;
             if kw == "All" {
@@ -85,10 +87,13 @@ impl Parse for SystemInput {
             } else if kw == "None" {
                 inner.parse::<Token![=]>()?;
                 none_types = parse_type_list_bracketed(&inner)?;
+            } else if kw == "Any" {
+                inner.parse::<Token![=]>()?;
+                any_types = parse_type_list_bracketed(&inner)?;
             } else { break; }
         }
         let body: Block = inner.parse()?;
-        Ok(SystemInput { stage_ident, fn_ident, view_args, all_types, none_types, body })
+        Ok(SystemInput { stage_ident, fn_ident, view_args, all_types, none_types, any_types, body })
     }
 }
 
@@ -101,6 +106,7 @@ pub fn system(input: TokenStream) -> TokenStream {
     let view_args = parsed.view_args;
     let all_types = parsed.all_types;
     let none_types = parsed.none_types;
+    let any_types = parsed.any_types;
     let body = parsed.body;
 
     let view_idents: Vec<Ident> = view_args.iter().map(|v| v.ident.clone()).collect();
@@ -108,9 +114,11 @@ pub fn system(input: TokenStream) -> TokenStream {
 
     let all_idents: Vec<Ident> = (0..all_types.len()).map(|i| format_ident!("all_s{}", i+1)).collect();
     let none_idents: Vec<Ident> = (0..none_types.len()).map(|i| format_ident!("none_s{}", i+1)).collect();
+    let any_idents: Vec<Ident> = (0..any_types.len()).map(|i| format_ident!("any_s{}", i+1)).collect();
 
     let all_storage_field_idents: Vec<Ident> = (0..all_types.len()).map(|i| format_ident!("all_storage{}", i+1)).collect();
     let none_storage_field_idents: Vec<Ident> = (0..none_types.len()).map(|i| format_ident!("none_storage{}", i+1)).collect();
+    let any_storage_field_idents: Vec<Ident> = (0..any_types.len()).map(|i| format_ident!("any_storage{}", i+1)).collect();
 
     let fn_inputs = view_args.iter().map(|va| {
         let vi = &va.ident; let ty = &va.ty;
@@ -120,6 +128,7 @@ pub fn system(input: TokenStream) -> TokenStream {
 
     let none_tuple_types = none_types.iter().map(|t| quote!(&crate::storage::storage::Storage<#t>));
     let all_tuple_types = all_types.iter().map(|t| quote!(&crate::storage::storage::Storage<#t>));
+    let any_tuple_types = any_types.iter().map(|t| quote!(&crate::storage::storage::Storage<#t>));
     let view_tuple_types_mixed = view_args.iter().map(|va| {
         let t = &va.ty;
         if va.is_mut { quote!(&mut crate::storage::storage::Storage<#t>) } else { quote!(&crate::storage::storage::Storage<#t>) }
@@ -127,12 +136,14 @@ pub fn system(input: TokenStream) -> TokenStream {
     let mut args_tuple_segs: Vec<proc_macro2::TokenStream> = Vec::new();
     if !none_types.is_empty() { args_tuple_segs.push(quote!( #( #none_tuple_types ),* )); }
     if !all_types.is_empty() { args_tuple_segs.push(quote!( #( #all_tuple_types ),* )); }
+    if !any_types.is_empty() { args_tuple_segs.push(quote!( #( #any_tuple_types ),* )); }
     args_tuple_segs.push(quote!( #( #view_tuple_types_mixed ),* ));
     let args_tuple_type = quote!( ( #(#args_tuple_segs),* ) );
 
     let mut destructure_segs: Vec<proc_macro2::TokenStream> = Vec::new();
     if !none_types.is_empty() { destructure_segs.push(quote!( #( #none_idents ),* )); }
     if !all_types.is_empty() { destructure_segs.push(quote!( #( #all_idents ),* )); }
+    if !any_types.is_empty() { destructure_segs.push(quote!( #( #any_idents ),* )); }
     destructure_segs.push(quote!( #( #view_idents ),* ));
     let args_destructure = quote!( let ( #(#destructure_segs),* ) = args; );
 
@@ -168,6 +179,19 @@ pub fn system(input: TokenStream) -> TokenStream {
         quote! { let mut none_mid: u128 = 0; #(#per_none)* middle_mask &= !none_mid; }
     };
 
+    let middle_any = if any_types.is_empty() { quote!() } else {
+        let per_any = any_idents.iter().map(|ai| {
+            quote! {
+                let rp = #ai.root.presence_mask;
+                if ((rp >> oi) & 1) != 0 {
+                    let ab = unsafe { #ai.root.data[oi as usize].assume_init_ref() };
+                    any_mid |= ab.presence_mask;
+                }
+            }
+        });
+        quote! { let mut any_mid: u128 = 0; #(#per_any)* middle_mask &= any_mid; }
+    };
+
     let inner_all = if all_types.is_empty() { quote!() } else {
         let per_all = all_idents.iter().map(|ai| {
             quote! {
@@ -196,6 +220,51 @@ pub fn system(input: TokenStream) -> TokenStream {
             }
         });
         quote! { let mut none_in: u128 = 0; #(#per_none)* inner_mask &= !none_in; }
+    };
+
+    let inner_any = if any_types.is_empty() { quote!() } else {
+        let per_any = any_idents.iter().enumerate().map(|(i, ai)| {
+            quote! {
+                let rp = #ai.root.presence_mask;
+                {
+                    use std::io::Write;
+                    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open("macro_debug.txt") {
+                        writeln!(file, "DEBUG: Any[{}] root presence: {:b}, oi: {}", #i, rp, oi).ok();
+                    }
+                }
+                if ((rp >> oi) & 1) != 0 {
+                    let ab = unsafe { #ai.root.data[oi as usize].assume_init_ref() };
+                    let mp = ab.presence_mask;
+                    {
+                        use std::io::Write;
+                        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open("macro_debug.txt") {
+                            writeln!(file, "DEBUG: Any[{}] middle presence: {:b}, mi: {}", #i, mp, mi).ok();
+                        }
+                    }
+                    if ((mp >> mi) & 1) != 0 {
+                        let ib = unsafe { ab.data[mi as usize].assume_init_ref() };
+                        any_in |= ib.presence_mask;
+                        {
+                            use std::io::Write;
+                            if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open("macro_debug.txt") {
+                                writeln!(file, "DEBUG: Any[{}] added mask: {:b}, new any_in: {:b}", #i, ib.presence_mask, any_in).ok();
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        quote! { 
+            let mut any_in: u128 = 0; 
+            #(#per_any)* 
+            {
+                use std::io::Write;
+                if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open("macro_debug.txt") {
+                    writeln!(file, "DEBUG: Final any_in: {:b}, inner_mask: {:b}", any_in, inner_mask).ok();
+                }
+            }
+            inner_mask &= any_in; 
+        }
     };
 
     let call_views = {
@@ -255,12 +324,14 @@ pub fn system(input: TokenStream) -> TokenStream {
                     #middle_intersections_views
                     #middle_all
                     #middle_none
+                    #middle_any
                     while middle_mask != 0 {
                         let mi = middle_mask.trailing_zeros();
                         let mut inner_mask: u128 = u128::MAX;
                         #inner_intersections_views
                         #inner_all
                         #inner_none
+                        #inner_any
                         while inner_mask != 0 {
                             let start = inner_mask.trailing_zeros();
                             let run = (inner_mask >> start).trailing_ones();
@@ -284,6 +355,10 @@ pub fn system(input: TokenStream) -> TokenStream {
         let id = &none_storage_field_idents[i];
         quote!( pub #id: std::rc::Rc<std::cell::RefCell<crate::storage::storage::Storage<#t>>> , )
     });
+    let struct_fields_any = any_types.iter().enumerate().map(|(i, t)| {
+        let id = &any_storage_field_idents[i];
+        quote!( pub #id: std::rc::Rc<std::cell::RefCell<crate::storage::storage::Storage<#t>>> , )
+    });
     let struct_fields_views = view_types.iter().enumerate().map(|(i, t)| {
         let id = &view_idents[i];
         quote!( pub #id: std::rc::Rc<std::cell::RefCell<crate::storage::storage::Storage<#t>>> , )
@@ -291,12 +366,14 @@ pub fn system(input: TokenStream) -> TokenStream {
 
     let run_args_none = none_storage_field_idents.iter().map(|id| quote!(&*self.#id.borrow()));
     let run_args_all = all_storage_field_idents.iter().map(|id| quote!(&*self.#id.borrow()));
+    let run_args_any = any_storage_field_idents.iter().map(|id| quote!(&*self.#id.borrow()));
     let run_args_views_mixed = view_args.iter().map(|va| {
         let id = &va.ident; if va.is_mut { quote!(&mut *self.#id.borrow_mut()) } else { quote!(&*self.#id.borrow()) }
     });
     let mut run_args_segs: Vec<proc_macro2::TokenStream> = Vec::new();
     if !none_types.is_empty() { run_args_segs.push(quote!( #( #run_args_none ),* )); }
     if !all_types.is_empty() { run_args_segs.push(quote!( #( #run_args_all ),* )); }
+    if !any_types.is_empty() { run_args_segs.push(quote!( #( #run_args_any ),* )); }
     run_args_segs.push(quote!( #( #run_args_views_mixed ),* ));
 
     let create_fields_none = none_types.iter().enumerate().map(|(i, t)| {
@@ -305,16 +382,21 @@ pub fn system(input: TokenStream) -> TokenStream {
     let create_fields_all = all_types.iter().enumerate().map(|(i, t)| {
         let id = &all_storage_field_idents[i]; quote!( #id: world.get::<#t>() )
     });
+    let create_fields_any = any_types.iter().enumerate().map(|(i, t)| {
+        let id = &any_storage_field_idents[i]; quote!( #id: world.get::<#t>() )
+    });
     let create_fields_views = view_types.iter().enumerate().map(|(i, t)| {
         let id = &view_idents[i]; quote!( #id: world.get::<#t>() )
     });
     let mut create_segs: Vec<proc_macro2::TokenStream> = Vec::new();
     if !none_types.is_empty() { create_segs.push(quote!( #( #create_fields_none ),* )); }
     if !all_types.is_empty() { create_segs.push(quote!( #( #create_fields_all ),* )); }
+    if !any_types.is_empty() { create_segs.push(quote!( #( #create_fields_any ),* )); }
     create_segs.push(quote!( #( #create_fields_views ),* ));
 
     let reads_types = none_types.iter().map(|t| quote!( std::any::TypeId::of::<#t>() ));
     let reads_types_all = all_types.iter().map(|t| quote!( std::any::TypeId::of::<#t>() ));
+    let reads_types_any = any_types.iter().map(|t| quote!( std::any::TypeId::of::<#t>() ));
     let reads_types_views = view_args.iter().filter(|va| !va.is_mut).map(|va| {
         let t = &va.ty; quote!( std::any::TypeId::of::<#t>() )
     });
@@ -324,11 +406,12 @@ pub fn system(input: TokenStream) -> TokenStream {
     let mut reads_segs: Vec<proc_macro2::TokenStream> = Vec::new();
     if !none_types.is_empty() { reads_segs.push(quote!( #( #reads_types ),* )); }
     if !all_types.is_empty() { reads_segs.push(quote!( #( #reads_types_all ),* )); }
+    if !any_types.is_empty() { reads_segs.push(quote!( #( #reads_types_any ),* )); }
     reads_segs.push(quote!( #( #reads_types_views ),* ));
 
     let expanded = quote! {
         #fn_def
-        pub struct #stage_ident { #( #struct_fields_none )* #( #struct_fields_all )* #( #struct_fields_views )* }
+        pub struct #stage_ident { #( #struct_fields_none )* #( #struct_fields_all )* #( #struct_fields_any )* #( #struct_fields_views )* }
         impl crate::scheduler::pipeline::PipelineStage for #stage_ident {
             fn run(&self) {
                 let sys: fn( #( #fn_arg_types_run ),* ) = #fn_ident;
@@ -350,6 +433,16 @@ pub fn system(input: TokenStream) -> TokenStream {
     };
 
     TokenStream::from(expanded)
+}
+
+#[proc_macro_derive(Component)]
+pub fn component_derive(input: TokenStream) -> TokenStream {
+    let ast = parse_macro_input!(input as syn::DeriveInput);
+    let name = &ast.ident;
+    let gen = quote! {
+        impl crate::component::Component for #name {}
+    };
+    gen.into()
 }
 
 #[proc_macro]

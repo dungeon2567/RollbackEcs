@@ -1,10 +1,39 @@
 use std::mem::MaybeUninit;
+use crate::tick::Tick;
 
 pub struct Block<T> {
     pub presence_mask: u128,
     pub absence_mask: u128,
     pub change_mask: u128,
     pub data: [MaybeUninit<T>; 128]
+}
+
+pub struct RollbackBlock<'a, T> {
+    pub presence_mask: u128,
+    pub absence_mask: u128,
+    pub tick: Tick,
+    pub data: &'a [T]
+}
+
+impl<T> Block<T> {
+    pub fn new() -> Self {
+        Block {
+            presence_mask: 0,
+            absence_mask: 0,
+            change_mask: 0,
+            data: std::array::from_fn(|_| std::mem::MaybeUninit::uninit())
+        }
+    }
+}
+
+impl<T> Block<Box<Block<T>>> {
+    pub fn ensure_child_exists(&mut self, index: u32) {
+        if (self.presence_mask >> index) & 1 == 0 {
+            let new_block = Block::new();
+            self.data[index as usize].write(Box::new(new_block));
+            self.presence_mask |= 1 << index;
+        }
+    }
 }
 
 impl<T> Drop for Block<T> {

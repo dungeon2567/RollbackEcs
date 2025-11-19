@@ -12,3 +12,5 @@ pub trait Component: Any where Self: Sized {
         *ID.get_or_init(|| COMPONENT_COUNTER.fetch_add(1, Ordering::Relaxed))
     }
 }
+
+pub use rollback_macros::Component;
