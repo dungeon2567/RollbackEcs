@@ -13,7 +13,8 @@ mod tests {
     use super::*;
     use rollback_macros::system;
 
-    use crate::component::Component;
+    use crate::component::{Component, Destroyed};
+    use crate::entity::Entity;
     use crate::scheduler::pipeline::PipelineStage;
     use crate::world::World;
 
@@ -38,10 +39,13 @@ mod tests {
     #[derive(Component)]
     pub struct G(u8);
 
+    #[derive(Component)]
+    pub struct H(u8);
+
     system! {
         DestroySystem {
             query! {
-                fn destroy(a: View<A>, b: ViewMut<B>, c: ViewMut<C>) All=[D] None=[E, F, G] {
+                fn destroy(e: ViewMut<Entity>) All=[Destroyed] {
 
                 }
             }

@@ -1,4 +1,6 @@
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+use crate::component::Component;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Component)]
 pub struct Entity(u32);
 
 impl Entity {

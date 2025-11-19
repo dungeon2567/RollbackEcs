@@ -32,6 +32,8 @@ impl<T> Block<Box<Block<T>>> {
             let new_block = Block::new();
             self.data[index as usize].write(Box::new(new_block));
             self.presence_mask |= 1 << index;
+            // Ensure the new child block is not marked as full (it's empty)
+            self.absence_mask &= !(1 << index);
         }
     }
 }

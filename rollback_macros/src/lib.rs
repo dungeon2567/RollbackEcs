@@ -445,6 +445,16 @@ pub fn component_derive(input: TokenStream) -> TokenStream {
     gen.into()
 }
 
+#[proc_macro_derive(Tag)]
+pub fn tag_derive(input: TokenStream) -> TokenStream {
+    let ast = parse_macro_input!(input as syn::DeriveInput);
+    let name = &ast.ident;
+    let gen = quote! {
+        impl crate::component::Component for #name {}
+    };
+    gen.into()
+}
+
 #[proc_macro]
 pub fn variadic_system(input: TokenStream) -> TokenStream {
     system(input)

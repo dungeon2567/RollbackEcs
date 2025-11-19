@@ -1,4 +1,3 @@
-use crate::component::Component;
 use crate::storage::block::Block;
 use crate::storage::view::ViewMut;
 
@@ -48,8 +47,7 @@ impl<T> Storage<T> {
         count
     }
 
-    pub fn set(&mut self, index: u32, value: &T) 
-    where T: Clone
+    pub fn set(&mut self, index: u32, value: &T) where T: Clone
     {
         // Decode global index to ri, mi, ii
         // ri (0..128) * 16384 + mi (0..128) * 128 + ii (0..128)
@@ -73,14 +71,21 @@ impl<T> Storage<T> {
         if (middle.presence_mask >> mi) & 1 == 0 {
             // Create new inner block
             let new_inner = Block::new();
+
             middle.data[mi as usize].write(Box::new(new_inner));
+
             middle.presence_mask |= 1 << mi;
         }
 
-        let inner = unsafe { middle.data[mi as usize].assume_init_mut() };
+        let inner = unsafe {
+            middle.data[mi as usize].assume_init_mut()
+        };
 
         // Set the value
-        let slot = unsafe { inner.data[ii as usize].assume_init_mut() };
+        let slot = unsafe {
+            inner.data[ii as usize].assume_init_mut()
+        };
+
         *slot = value.clone();
         
         // Update presence and absence masks
@@ -92,7 +97,7 @@ impl<T> Storage<T> {
 use crate::entity::Entity;
 
 impl Storage<Entity> {
-    pub fn create(&mut self) -> &Entity {
+    pub fn spawn(&mut self) -> &Entity {
         let root = &mut self.root;
         
         // 1. Find free slot in root
@@ -104,8 +109,6 @@ impl Storage<Entity> {
         
         root.ensure_child_exists(ri);
         
-        let mut inner_full = false;
-        let mut middle_full = false;
         let mi;
         let ii;
 
@@ -121,61 +124,88 @@ impl Storage<Entity> {
 
             // Ensure inner block exists
             if (middle.presence_mask >> mi) & 1 == 0 {
-                let mut new_inner = Block::new();
-                
-                // Pre-initialize all entities in this new chunk
-                for i in 0..128 {
-                    let global_index = ri * 16384 + mi * 128 + i;
-                    new_inner.data[i as usize].write(Entity::new(global_index, 0));
-                }
-                // All slots are present (initialized)
-                new_inner.presence_mask = u128::MAX;
-                // All slots are free (absent from "occupied" set)
-                new_inner.absence_mask = 0;
-                
+                let new_inner = Block::new();
                 middle.data[mi as usize].write(Box::new(new_inner));
                 middle.presence_mask |= 1 << mi;
+                // Ensure the new inner block is not marked as full (it's empty)
+                middle.absence_mask &= !(1 << mi);
             }
             
             {
                 let inner = unsafe { middle.data[mi as usize].assume_init_mut() };
 
                 // 3. Find free slot in inner
+                // For entities, we need to find a slot that is not occupied
+                // We can reuse slots that were previously occupied but are now free
                 let free_inner = !inner.absence_mask;
                 if free_inner == 0 {
                      panic!("Storage inconsistency: Middle said free, Inner is full");
                 }
                 ii = free_inner.trailing_zeros();
 
-                // Always increment generation for the allocated entity
+                // Initialize or update the entity
+                let global_index = ri * 16384 + mi * 128 + ii;
+                if (inner.presence_mask >> ii) & 1 == 0 {
+                    // First time initializing this slot
+                    inner.data[ii as usize].write(Entity::new(global_index, 0));
+                    inner.presence_mask |= 1 << ii;
+                }
+                
+                // Increment generation for the allocated entity
                 let entity = unsafe { inner.data[ii as usize].assume_init_mut() };
                 entity.increment_generation();
                 
                 // Mark as occupied
                 inner.absence_mask |= 1 << ii;
                 
+                // Maintain invariant: propagate fullness up the hierarchy
                 if inner.absence_mask == u128::MAX {
-                    inner_full = true;
+                    middle.absence_mask |= 1 << mi;
                 }
             }
             
-            if inner_full {
-                middle.absence_mask |= 1 << mi;
-                if middle.absence_mask == u128::MAX {
-                    middle_full = true;
-                }
+            // Maintain invariant: propagate fullness to root
+            if middle.absence_mask == u128::MAX {
+                root.absence_mask |= 1 << ri;
             }
-        }
-        
-        if middle_full {
-            root.absence_mask |= 1 << ri;
         }
 
         // Re-traverse to return the reference.
         unsafe {
             let middle = root.data[ri as usize].assume_init_mut();
             let inner = middle.data[mi as usize].assume_init_mut();
+            
             inner.data[ii as usize].assume_init_ref()
+        }
+    }
+
+    pub fn remove(&mut self, index: u32) {
+        let ri = index / 16384;
+        let mi = (index % 16384) / 128;
+        let ii = index % 128;
+
+        let root = &mut self.root;
+        if (root.presence_mask >> ri) & 1 == 0 {
+            return; // Middle block doesn't exist
+        }
+
+        let middle = unsafe { root.data[ri as usize].assume_init_mut() };
+        if (middle.presence_mask >> mi) & 1 == 0 {
+            return; // Inner block doesn't exist
+        }
+
+        let inner = unsafe { middle.data[mi as usize].assume_init_mut() };
+        
+        // Clear the absence bit
+        inner.absence_mask &= !(1 << ii);
+        
+        // Maintain invariant: propagate non-fullness up the hierarchy
+        if inner.absence_mask != u128::MAX {
+            middle.absence_mask &= !(1 << mi);
+        }
+        
+        if middle.absence_mask != u128::MAX {
+            root.absence_mask &= !(1 << ri);
         }
     }
 }
@@ -186,13 +216,88 @@ mod tests {
     use crate::component::Component;
     use crate::storage::block::Block;
 
+    /// Verify tree invariants for the storage hierarchy
+    fn verify_tree_invariants<T>(storage: &Storage<T>) {
+        let root = &storage.root;
+        
+        // Invariant 1: absence_mask must be subset of presence_mask
+        assert_eq!(
+            root.absence_mask & !root.presence_mask,
+            0,
+            "Root: absence_mask has bits set where presence_mask is not set"
+        );
+        
+        // Iterate over all present middle blocks
+        let mut middle_iter = root.presence_mask;
+
+        while middle_iter != 0 {
+            let ri = middle_iter.trailing_zeros();
+            let middle = unsafe { root.data[ri as usize].assume_init_ref() };
+            
+            // Invariant 2: middle absence_mask must be subset of presence_mask
+            assert_eq!(
+                middle.absence_mask & !middle.presence_mask,
+                0,
+                "Middle[{}]: absence_mask has bits set where presence_mask is not set",
+                ri
+            );
+            
+            // Invariant 3: If middle is full, root's absence_mask should reflect this
+            let middle_is_full = middle.absence_mask == u128::MAX;
+            let root_thinks_full = (root.absence_mask >> ri) & 1 == 1;
+
+            assert_eq!(
+                middle_is_full,
+                root_thinks_full,
+                "Middle[{}]: fullness mismatch (middle_full={}, root_thinks_full={})",
+                ri,
+                middle_is_full,
+                root_thinks_full
+            );
+            
+            // Iterate over all present inner blocks
+            let mut inner_iter = middle.presence_mask;
+
+            while inner_iter != 0 {
+                let mi = inner_iter.trailing_zeros();
+                let inner = unsafe { middle.data[mi as usize].assume_init_ref() };
+                
+                // Invariant 4: inner absence_mask must be subset of presence_mask
+                assert_eq!(
+                    inner.absence_mask & !inner.presence_mask,
+                    0,
+                    "Inner[{}, {}]: absence_mask has bits set where presence_mask is not set",
+                    ri,
+                    mi
+                );
+                
+                // Invariant 5: If inner is full, middle's absence_mask should reflect this
+                let inner_is_full = inner.absence_mask == u128::MAX;
+                let middle_thinks_full = (middle.absence_mask >> mi) & 1 == 1;
+                assert_eq!(
+                    inner_is_full,
+                    middle_thinks_full,
+                    "Inner[{}, {}]: fullness mismatch (inner_full={}, middle_thinks_full={})",
+                    ri,
+                    mi,
+                    inner_is_full,
+                    middle_thinks_full
+                );
+                
+                inner_iter &= !(1 << mi);
+            }
+            
+            middle_iter &= !(1 << ri);
+        }
+    }
+
     #[test]
     fn test_create() {
         let mut storage = Storage::<Entity>::new();
 
         // Create 128 items (fill one inner block)
         for i in 0..128 {
-            let e = storage.create();
+            let e = storage.spawn();
             assert_eq!(e.index(), i);
             assert_eq!(e.generation(), 1);
         }
@@ -217,12 +322,14 @@ mod tests {
             assert_eq!(inner.presence_mask, u128::MAX);
             assert_eq!(inner.absence_mask, u128::MAX);
         }
+        
+        verify_tree_invariants(&storage);
 
         // Fill the rest of the first middle block (128 * 128 = 16384 items total)
         // We already inserted 128 items (0..128).
         // We need to insert 127 more inner blocks.
         for i in 128..16384 {
-            let e = storage.create();
+            let e = storage.spawn();
             assert_eq!(e.index(), i);
             assert_eq!(e.generation(), 1);
         }
@@ -240,6 +347,8 @@ mod tests {
             assert_eq!(middle.presence_mask, u128::MAX); // All inner blocks present
             assert_eq!(middle.absence_mask, u128::MAX); // All inner blocks full
         }
+        
+        verify_tree_invariants(&storage);
     }
 
     #[test]
@@ -249,30 +358,32 @@ mod tests {
         assert_eq!(storage.len(), 0);
 
         for _ in 0..10 {
-            storage.create();
+            storage.spawn();
         }
         assert_eq!(storage.len(), 10);
 
         // Fill one inner block (128 items)
         for _ in 10..128 {
-            storage.create();
+            storage.spawn();
         }
         assert_eq!(storage.len(), 128);
 
         // Add one more to start next inner block
-        storage.create();
+        storage.spawn();
         assert_eq!(storage.len(), 129);
 
         // Fill a whole middle block (128 * 128 = 16384 items)
         // We already have 129 items.
         for _ in 129..16384 {
-            storage.create();
+            storage.spawn();
         }
         assert_eq!(storage.len(), 16384);
 
         // Add one more to start next middle block
-        storage.create();
+        storage.spawn();
         assert_eq!(storage.len(), 16385);
+        
+        verify_tree_invariants(&storage);
     }
 
     #[test]
@@ -280,12 +391,12 @@ mod tests {
         let mut storage = Storage::<Entity>::new();
 
         // Create first entity
-        let e1 = *storage.create();
+        let e1 = *storage.spawn();
         assert_eq!(e1.index(), 0);
         assert_eq!(e1.generation(), 1); // Initialized to 0, incremented to 1
 
         // Create second entity
-        let e2 = *storage.create();
+        let e2 = *storage.spawn();
         assert_eq!(e2.index(), 1);
         assert_eq!(e2.generation(), 1); // Initialized to 0, incremented to 1
 
@@ -299,8 +410,196 @@ mod tests {
         }
 
         // Create again, should reuse slot 0 and increment generation
-        let e3 = *storage.create();
+        let e3 = *storage.spawn();
         assert_eq!(e3.index(), 0);
         assert_eq!(e3.generation(), 2); // 1 -> 2
+        
+        verify_tree_invariants(&storage);
+    }
+
+    // Helper function to delete an entity using the Storage::remove method
+    fn delete_entity(storage: &mut Storage<Entity>, index: u32) {
+        storage.remove(index);
+    }
+
+    #[test]
+    fn test_spawn_delete_cycle() {
+        let mut storage = Storage::<Entity>::new();
+        
+        // Spawn and delete the same slot multiple times
+        for cycle in 1..=10 {
+            let e = *storage.spawn();
+            assert_eq!(e.index(), 0);
+            assert_eq!(e.generation(), cycle);
+            
+            verify_tree_invariants(&storage);
+            assert_eq!(storage.len(), 1);
+            
+            delete_entity(&mut storage, 0);
+            
+            verify_tree_invariants(&storage);
+            assert_eq!(storage.len(), 0);
+        }
+    }
+
+    #[test]
+    fn test_batch_delete_and_respawn() {
+        let mut storage = Storage::<Entity>::new();
+        
+        // Spawn 256 entities (2 full inner blocks)
+        for i in 0..256 {
+            let e = storage.spawn();
+            assert_eq!(e.index(), i);
+            assert_eq!(e.generation(), 1);
+        }
+        
+        verify_tree_invariants(&storage);
+        assert_eq!(storage.len(), 256);
+        
+        // Delete first 128 entities (first inner block)
+        for i in 0..128 {
+            delete_entity(&mut storage, i);
+        }
+        
+        verify_tree_invariants(&storage);
+        assert_eq!(storage.len(), 128);
+        
+        // Spawn again, should reuse first 128 slots with incremented generation
+        for i in 0..128 {
+            let e = storage.spawn();
+            assert_eq!(e.index(), i);
+            assert_eq!(e.generation(), 2); // Generation incremented
+        }
+        
+        verify_tree_invariants(&storage);
+        assert_eq!(storage.len(), 256);
+    }
+
+    #[test]
+    fn test_delete_every_other() {
+        let mut storage = Storage::<Entity>::new();
+        
+        // Spawn 100 entities
+        for i in 0..100 {
+            let e = storage.spawn();
+            assert_eq!(e.index(), i);
+        }
+        
+        verify_tree_invariants(&storage);
+        assert_eq!(storage.len(), 100);
+        
+        // Delete every other entity (even indices)
+        for i in (0..100).step_by(2) {
+            delete_entity(&mut storage, i);
+        }
+        
+        verify_tree_invariants(&storage);
+        assert_eq!(storage.len(), 50);
+        
+        // Spawn 50 more, should fill the even slots
+        for i in (0..100).step_by(2) {
+            let e = storage.spawn();
+            assert_eq!(e.index(), i); // Should reuse even slots
+            assert_eq!(e.generation(), 2);
+        }
+        
+        verify_tree_invariants(&storage);
+        assert_eq!(storage.len(), 100);
+    }
+
+    #[test]
+    fn test_delete_across_blocks() {
+        let mut storage = Storage::<Entity>::new();
+        
+        // Fill first inner block completely (128 entities)
+        for i in 0..128 {
+            let e = storage.spawn();
+            assert_eq!(e.index(), i);
+            assert_eq!(e.generation(), 1);
+        }
+        
+        verify_tree_invariants(&storage);
+        
+        // Spawn 64 more in second inner block
+        for i in 128..192 {
+            let e = storage.spawn();
+            assert_eq!(e.index(), i);
+            assert_eq!(e.generation(), 1);
+        }
+        
+        verify_tree_invariants(&storage);
+        assert_eq!(storage.len(), 192);
+        
+        // Delete from both blocks: last 64 from first block, first 32 from second
+        for i in 64..128 {
+            delete_entity(&mut storage, i);
+        }
+        for i in 128..160 {
+            delete_entity(&mut storage, i);
+        }
+        
+        verify_tree_invariants(&storage);
+        assert_eq!(storage.len(), 96);
+        
+        // Spawn again - should fill deleted slots in order
+        // First fill 64..128, then 128..160
+        for expected_idx in (64..128).chain(128..160) {
+            let e = storage.spawn();
+            assert_eq!(e.index(), expected_idx);
+            assert_eq!(e.generation(), 2);
+        }
+        
+        verify_tree_invariants(&storage);
+        assert_eq!(storage.len(), 192);
+    }
+
+    #[test]
+    fn test_delete_loop_pattern() {
+        let mut storage = Storage::<Entity>::new();
+        
+        // Pattern: spawn 10, delete 5, spawn 10, delete 5, etc.
+        let mut expected_indices = Vec::new();
+        
+        // First batch: spawn 10 (indices 0..10)
+        for i in 0..10 {
+            storage.spawn();
+            expected_indices.push(i);
+        }
+        verify_tree_invariants(&storage);
+        
+        // Delete last 5 (indices 5..10)
+        for i in 5..10 {
+            delete_entity(&mut storage, i);
+            expected_indices.retain(|&x| x != i);
+        }
+        verify_tree_invariants(&storage);
+        assert_eq!(storage.len(), 5);
+        
+        // Second batch: spawn 10
+        // Should reuse 5..10, then allocate 10..15
+        for i in (5..10).chain(10..15) {
+            let e = storage.spawn();
+            assert_eq!(e.index(), i);
+            expected_indices.push(i);
+        }
+        verify_tree_invariants(&storage);
+        assert_eq!(storage.len(), 15);
+        
+        // Delete 10..15
+        for i in 10..15 {
+            delete_entity(&mut storage, i);
+            expected_indices.retain(|&x| x != i);
+        }
+        verify_tree_invariants(&storage);
+        assert_eq!(storage.len(), 10);
+        
+        // Third batch: spawn 10
+        // Should reuse 10..15, then allocate 15..20
+        for i in (10..15).chain(15..20) {
+            let e = storage.spawn();
+            assert_eq!(e.index(), i);
+        }
+        verify_tree_invariants(&storage);
+        assert_eq!(storage.len(), 20);
     }
 }

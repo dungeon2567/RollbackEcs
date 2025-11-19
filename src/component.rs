@@ -13,4 +13,12 @@ pub trait Component: Any where Self: Sized {
     }
 }
 
+pub trait Tag: Component + Any where Self: Sized{
+
+}
+
+#[derive(Tag)]
+pub struct Destroyed {}
+
 pub use rollback_macros::Component;
+pub use rollback_macros::Tag;
