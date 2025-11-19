@@ -1,0 +1,7 @@
+[package]
+name = "RollbackEcs"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+rollback_macros = { path = "rollback_macros" }
