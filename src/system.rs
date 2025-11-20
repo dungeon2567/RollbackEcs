@@ -14,6 +14,16 @@ system! {
     }
 }
 
+system! {
+    PrintEntitySystem {
+        query! {
+            fn print(e: View<Entity>) {
+                println!("{:?}", e);
+            }
+        }
+    }
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -99,5 +109,25 @@ mod tests {
         // All entities and destroyed tags should be removed
         assert_eq!(destroyed.borrow().len(), 0);
         assert_eq!(ents.borrow().len(), 0);
+    }
+
+    #[test]
+    fn print_entity_system_runs() {
+        let mut world = World::new();
+
+        let ents = world.get::<Entity>();
+
+        // Spawn some entities
+        let e0 = *ents.borrow_mut().spawn();
+        let e1 = *ents.borrow_mut().spawn();
+        let e2 = *ents.borrow_mut().spawn();
+
+        assert_eq!(ents.borrow().len(), 3);
+
+        // Run the print system - should print to stdout without crashing
+        world.run::<PrintEntitySystem>();
+
+        // Entities should still be there
+        assert_eq!(ents.borrow().len(), 3);
     }
 }
