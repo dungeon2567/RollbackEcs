@@ -100,6 +100,55 @@ impl<T> Storage<T> {
         middle.changed_mask |= 1 << mi;
         root.changed_mask |= 1 << ri;
     }
+
+    pub fn remove(&mut self, index: u32) {
+        // Decode global index to ri, mi, ii
+        let ri = index / 16384;
+        let mi = (index % 16384) / 128;
+        let ii = index % 128;
+
+        let root = &mut self.root;
+        if (root.presence_mask >> ri) & 1 == 0 {
+            return; // Middle block doesn't exist
+        }
+
+        let middle = unsafe { root.data[ri as usize].assume_init_mut() };
+        if (middle.presence_mask >> mi) & 1 == 0 {
+            return; // Inner block doesn't exist
+        }
+
+        let inner = unsafe { middle.data[mi as usize].assume_init_mut() };
+        
+        // Check if component actually exists before removing
+        if (inner.presence_mask >> ii) & 1 == 0 {
+            return; // Component doesn't exist, nothing to remove
+        }
+        
+        // NOTE: We do NOT clear presence_mask here
+        // For entities: presence_mask tracks initialization, not current existence
+        // This allows entity generation to persist across delete/respawn cycles
+        // For regular components: keeping presence_mask set is harmless and
+        // allows us to track that the slot has been used
+        
+        // Clear the absence bit (slot now has free space)
+        inner.absence_mask &= !(1 << ii);
+        
+        // Mark as changed (removal is a change)
+        inner.changed_mask |= 1 << ii;
+        
+        // Maintain invariant: propagate non-fullness up the hierarchy
+        if inner.absence_mask != u128::MAX {
+            middle.absence_mask &= !(1 << mi);
+        }
+        
+        if middle.absence_mask != u128::MAX {
+            root.absence_mask &= !(1 << ri);
+        }
+        
+        // Propagate changed_mask up the hierarchy
+        middle.changed_mask |= 1 << mi;
+        root.changed_mask |= 1 << ri;
+    }
 }
 
 use crate::entity::Entity;
@@ -166,6 +215,9 @@ impl Storage<Entity> {
                 // Mark as occupied
                 inner.absence_mask |= 1 << ii;
                 
+                // Mark as changed - spawning/respawning is a change
+                inner.changed_mask |= 1 << ii;
+                
                 // Maintain invariant: propagate fullness up the hierarchy
                 if inner.absence_mask == u128::MAX {
                     middle.absence_mask |= 1 << mi;
@@ -176,7 +228,12 @@ impl Storage<Entity> {
             if middle.absence_mask == u128::MAX {
                 root.absence_mask |= 1 << ri;
             }
+            
+            // Propagate changed_mask up the hierarchy
+            middle.changed_mask |= 1 << mi;
         }
+        
+        root.changed_mask |= 1 << ri;
 
         // Re-traverse to return the reference.
         unsafe {
@@ -186,36 +243,7 @@ impl Storage<Entity> {
             inner.data[ii as usize].assume_init_ref()
         }
     }
-
-    pub fn remove(&mut self, index: u32) {
-        let ri = index / 16384;
-        let mi = (index % 16384) / 128;
-        let ii = index % 128;
-
-        let root = &mut self.root;
-        if (root.presence_mask >> ri) & 1 == 0 {
-            return; // Middle block doesn't exist
-        }
-
-        let middle = unsafe { root.data[ri as usize].assume_init_mut() };
-        if (middle.presence_mask >> mi) & 1 == 0 {
-            return; // Inner block doesn't exist
-        }
-
-        let inner = unsafe { middle.data[mi as usize].assume_init_mut() };
-        
-        // Clear the absence bit
-        inner.absence_mask &= !(1 << ii);
-        
-        // Maintain invariant: propagate non-fullness up the hierarchy
-        if inner.absence_mask != u128::MAX {
-            middle.absence_mask &= !(1 << mi);
-        }
-        
-        if middle.absence_mask != u128::MAX {
-            root.absence_mask &= !(1 << ri);
-        }
-    }
+    
 }
 
 #[cfg(test)]

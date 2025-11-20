@@ -53,6 +53,7 @@ struct SystemInput {
     all_types: Vec<Type>,
     none_types: Vec<Type>,
     any_types: Vec<Type>,
+    changed_types: Vec<Type>,
     remove_types: Vec<Type>,
     body: Block,
 }
@@ -81,6 +82,7 @@ impl Parse for SystemInput {
         let mut all_types = Vec::new();
         let mut none_types = Vec::new();
         let mut any_types = Vec::new();
+        let mut changed_types = Vec::new();
         let mut remove_types = Vec::new();
         while inner.peek(Ident) {
             let kw: Ident = inner.parse()?;
@@ -93,13 +95,16 @@ impl Parse for SystemInput {
             } else if kw == "Any" {
                 inner.parse::<Token![=]>()?;
                 any_types = parse_type_list_bracketed(&inner)?;
+            } else if kw == "Changed" {
+                inner.parse::<Token![=]>()?;
+                changed_types = parse_type_list_bracketed(&inner)?;
             } else if kw == "Remove" {
                 inner.parse::<Token![=]>()?;
                 remove_types = parse_type_list_bracketed(&inner)?;
             } else { break; }
         }
         let body: Block = inner.parse()?;
-        Ok(SystemInput { stage_ident, fn_ident, view_args, all_types, none_types, any_types, remove_types, body })
+        Ok(SystemInput { stage_ident, fn_ident, view_args, all_types, none_types, any_types, changed_types, remove_types, body })
     }
 }
 
@@ -113,6 +118,7 @@ pub fn system(input: TokenStream) -> TokenStream {
     let all_types = parsed.all_types;
     let none_types = parsed.none_types;
     let any_types = parsed.any_types;
+    let changed_types = parsed.changed_types;
     let remove_types = parsed.remove_types;
     let body = parsed.body;
 
@@ -143,6 +149,7 @@ pub fn system(input: TokenStream) -> TokenStream {
     for t in &none_types { push_unique(t); }
     for t in &all_types { push_unique(t); }
     for t in &any_types { push_unique(t); }
+    for t in &changed_types { push_unique(t); }
     for t in &remove_types { push_unique(t); }
     for t in &view_types { push_unique(t); }
     let unique_idents: Vec<Ident> = (0..unique_types.len()).map(|i| format_ident!("storage{}", i+1)).collect();
@@ -157,6 +164,7 @@ pub fn system(input: TokenStream) -> TokenStream {
     let all_storage_idents: Vec<Ident> = all_types.iter().map(resolve_storage_ident).collect();
     let none_storage_idents: Vec<Ident> = none_types.iter().map(resolve_storage_ident).collect();
     let any_storage_idents: Vec<Ident> = any_types.iter().map(resolve_storage_ident).collect();
+    let changed_storage_idents: Vec<Ident> = changed_types.iter().map(resolve_storage_ident).collect();
     let remove_storage_idents: Vec<Ident> = remove_types.iter().map(resolve_storage_ident).collect();
 
     // Deprecated per-type field idents; using unique storages instead
@@ -233,6 +241,20 @@ pub fn system(input: TokenStream) -> TokenStream {
         quote! { let mut any_mid: u128 = 0; #(#per_any)* middle_mask &= any_mid; }
     };
 
+    let middle_changed = if changed_types.is_empty() { quote!() } else {
+        let per_changed = changed_storage_idents.iter().map(|ci| {
+            quote! {
+                let rp = #ci.root.presence_mask;
+                if ((rp >> oi) & 1) != 0 {
+                    let cb = unsafe { #ci.root.data[oi as usize].assume_init_ref() };
+                    changed_mid |= cb.changed_mask;
+                }
+            }
+        });
+        quote! { let mut changed_mid: u128 = 0; #(#per_changed)* middle_mask &= changed_mid; }
+    };
+
+
     let inner_all = if all_types.is_empty() { quote!() } else {
         let per_all_regular = all_storage_idents.iter().map(|ai| {
             quote! {
@@ -307,6 +329,24 @@ pub fn system(input: TokenStream) -> TokenStream {
             inner_mask &= any_in; 
         }
     };
+
+    let inner_changed = if changed_types.is_empty() { quote!() } else {
+        let per_changed = changed_storage_idents.iter().map(|ci| {
+            quote! {
+                let rp = #ci.root.presence_mask;
+                if ((rp >> oi) & 1) != 0 {
+                    let cb = unsafe { #ci.root.data[oi as usize].assume_init_ref() };
+                    let mp = cb.presence_mask;
+                    if ((mp >> mi) & 1) != 0 {
+                        let ib = unsafe { cb.data[mi as usize].assume_init_ref() };
+                        changed_in |= ib.changed_mask;
+                    }
+                }
+            }
+        });
+        quote! { let mut changed_in: u128 = 0; #(#per_changed)* inner_mask &= changed_in; }
+    };
+
 
     // Generate function call with View/ViewMut arguments - call for EACH entity in the run
     let call_views = if !view_args.is_empty() {
@@ -458,6 +498,7 @@ pub fn system(input: TokenStream) -> TokenStream {
                     #middle_all
                     #middle_none
                     #middle_any
+                    #middle_changed
                     while middle_mask != 0 {
                         let mi = middle_mask.trailing_zeros();
                         let mut inner_mask: u128 = u128::MAX;
@@ -465,6 +506,7 @@ pub fn system(input: TokenStream) -> TokenStream {
                         #inner_all
                         #inner_none
                         #inner_any
+                        #inner_changed
                         while inner_mask != 0 {
                             let start = inner_mask.trailing_zeros();
                             let run = (inner_mask >> start).trailing_ones();
