@@ -1,6 +1,6 @@
 use crate::component::Component;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Component)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Component, Default)]
 pub struct Entity(u32);
 
 impl Entity {
@@ -16,6 +16,16 @@ impl Entity {
         let generation = generation & Self::GENERATION_MASK;
 
         Entity((index << Self::GENERATION_BITS) | generation)
+    }
+
+    #[inline(always)]
+    pub fn none() -> Self {
+        Entity(0)
+    }
+
+    #[inline(always)]
+    pub fn is_none(&self) -> bool {
+        self.generation() == 0
     }
 
     #[inline(always)]
@@ -49,5 +59,11 @@ impl Entity {
     pub fn increment_generation(&mut self) {
         let generation = self.generation().wrapping_add(1) & Self::GENERATION_MASK;
         self.set_generation(generation);
+    }
+}
+
+impl std::fmt::Debug for Entity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Entity(id = {}, generation = {})", self.index(), self.generation())
     }
 }

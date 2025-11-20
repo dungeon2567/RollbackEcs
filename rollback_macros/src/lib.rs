@@ -108,13 +108,13 @@ pub fn system(input: TokenStream) -> TokenStream {
     let parsed = parse_macro_input!(input as SystemInput);
 
     let stage_ident = parsed.stage_ident;
-    let _fn_ident = parsed.fn_ident;
+    let fn_ident = parsed.fn_ident;
     let view_args = parsed.view_args;
     let all_types = parsed.all_types;
     let none_types = parsed.none_types;
     let any_types = parsed.any_types;
     let remove_types = parsed.remove_types;
-    let _body = parsed.body;
+    let body = parsed.body;
 
     let view_types: Vec<Type> = view_args.iter().map(|v| v.ty.clone()).collect();
 
@@ -308,7 +308,48 @@ pub fn system(input: TokenStream) -> TokenStream {
         }
     };
 
-    let call_views = quote!();
+    // Generate function call with View/ViewMut arguments - call for EACH entity in the run
+    let call_views = if !view_args.is_empty() {
+        // Create View/ViewMut construction for each argument
+        let view_constructions = view_args.iter().enumerate().map(|(i, va)| {
+            let arg_ident = &va.ident;
+            let storage_ident = &view_storage_idents[i];
+            
+            if va.is_mut {
+                quote! {
+                    let #arg_ident = {
+                        let root = unsafe { &mut #storage_ident.root };
+                        let middle = unsafe { root.data[oi as usize].assume_init_mut() };
+                        let inner = unsafe { middle.data[mi as usize].assume_init_mut() };
+                        crate::storage::view::ViewMut::new(
+                            unsafe { inner.data[ii as usize].assume_init_mut() }
+                        )
+                    };
+                }
+            } else {
+                quote! {
+                    let #arg_ident = {
+                        let root = unsafe { &#storage_ident.root };
+                        let middle = unsafe { root.data[oi as usize].assume_init_ref() };
+                        let inner = unsafe { middle.data[mi as usize].assume_init_ref() };
+                        crate::storage::view::View::new(
+                            unsafe { inner.data[ii as usize].assume_init_ref() }
+                        )
+                    };
+                }
+            }
+        });
+        
+        quote! {
+            for ii in start..(start + run) {
+                #( #view_constructions )*
+                #body
+            }
+        }
+    } else {
+        quote! { #body }
+    };
+
 
     let remove_components = if !remove_types.is_empty() {
         let remove_logic = remove_types.iter().enumerate().map(|(i, t)| {

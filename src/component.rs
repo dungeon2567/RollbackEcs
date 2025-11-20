@@ -9,7 +9,7 @@ pub fn next_id() -> usize {
     NEXT_ID.fetch_add(1, Ordering::Relaxed)
 }
 
-pub trait Component: Any where Self: Sized {
+pub trait Component: Any + Default where Self: Sized {
     fn type_index() -> usize;
 }
 
@@ -22,7 +22,7 @@ pub trait Tag: Any where Self: Sized{
 
 }
 
-#[derive(Component, Clone)]
+#[derive(Component, Default, Clone)]
 pub struct Destroyed {}
 
 pub use rollback_macros::Component;

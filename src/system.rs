@@ -18,7 +18,7 @@ system! {
     PrintEntitySystem {
         query! {
             fn print(e: View<Entity>) {
-                println!("{:?}", e);
+                println!("{:?}", *e);
             }
         }
     }
