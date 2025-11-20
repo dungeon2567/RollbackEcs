@@ -1,54 +1,72 @@
-use crate::storage::block::Block;
+use rollback_macros::system as system;
 
-pub use rollback_macros::system;
+// Query trait not used in inlined macro run
 
-pub trait Query<Args> {
-    fn run(&self, args: Args);
+use crate::component::Destroyed;
+use crate::entity::Entity;
+
+
+system! {
+    DestroySystem {
+        query! {
+            fn destroy() All=[Entity, Destroyed] Remove=[Entity, Destroyed] { }
+        }
+    }
 }
-
-pub trait System<Args> {}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rollback_macros::system;
-
-    use crate::component::{Component, Destroyed};
-    use crate::entity::Entity;
-    use crate::scheduler::pipeline::PipelineStage;
     use crate::world::World;
 
-    #[derive(Component)]
-    pub struct A(u8);
+    #[test]
+    fn basic_entity_spawn_test() {
+        let mut world = World::new();
+        let ents = world.get::<Entity>();
 
-    #[derive(Component)]
-    pub struct B(u8);
+        let e0 = *ents.borrow_mut().spawn();
+        let e1 = *ents.borrow_mut().spawn();
+        let _e2 = *ents.borrow_mut().spawn();
 
-    #[derive(Component)]
-    pub struct C(u8);
+        assert_eq!(ents.borrow().len(), 3);
+    }
 
-    #[derive(Component)]
-    pub struct D(u8);
+    #[test] 
+    fn destroyed_component_test() {
+        let mut world = World::new();
+        let ents = world.get::<Entity>();
+        let destroyed = world.get::<Destroyed>();
 
-    #[derive(Component)]
-    pub struct E(u8);
+        assert_eq!(destroyed.borrow().len(), 0);
+        
+        let e0 = *ents.borrow_mut().spawn();
+        let e1 = *ents.borrow_mut().spawn();
 
-    #[derive(Component)]
-    pub struct F(u8);
+        assert_eq!(destroyed.borrow().len(), 0);
+        
+        destroyed.borrow_mut().set(e1.index(), &Destroyed{});
+        assert_eq!(destroyed.borrow().len(), 1);
+    }
 
-    #[derive(Component)]
-    pub struct G(u8);
+    #[test]
+    fn destroy_system_removes_entity_and_tag() {
+        let mut world = World::new();
+        let ents = world.get::<Entity>();
+        let destroyed = world.get::<Destroyed>();
 
-    #[derive(Component)]
-    pub struct H(u8);
+        let e0 = *ents.borrow_mut().spawn();
+        let e1 = *ents.borrow_mut().spawn();
+        let e2 = *ents.borrow_mut().spawn();
 
-    system! {
-        DestroySystem {
-            query! {
-                fn destroy(e: ViewMut<Entity>) All=[Destroyed] {
+        assert_eq!(ents.borrow().len(), 3);
+        assert_eq!(destroyed.borrow().len(), 0);
 
-                }
-            }
-        }
+        destroyed.borrow_mut().set(e1.index(), &Destroyed{});
+        assert_eq!(destroyed.borrow().len(), 1);
+
+        world.run::<DestroySystem>();
+
+        assert_eq!(destroyed.borrow().len(), 0);
+        assert_eq!(ents.borrow().len(), 2);
     }
 }

@@ -1,23 +1,28 @@
 use std::any::Any;
 use std::cell::OnceCell;
-use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::OnceLock;
 
-static COMPONENT_COUNTER: AtomicUsize = AtomicUsize::new(0);
+pub fn next_id() -> usize {
+    static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
+
+    NEXT_ID.fetch_add(1, Ordering::Relaxed)
+}
 
 pub trait Component: Any where Self: Sized {
-    fn type_index() -> usize {
-        static ID: OnceLock<usize> = OnceLock::new();
-
-        *ID.get_or_init(|| COMPONENT_COUNTER.fetch_add(1, Ordering::Relaxed))
-    }
+    fn type_index() -> usize;
 }
 
-pub trait Tag: Component + Any where Self: Sized{
+pub struct ComponentInfo {
+    pub name: &'static str,
+    pub id: OnceLock<usize>,
+}
+
+pub trait Tag: Any where Self: Sized{
 
 }
 
-#[derive(Tag)]
+#[derive(Component, Clone)]
 pub struct Destroyed {}
 
 pub use rollback_macros::Component;

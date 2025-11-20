@@ -5,7 +5,6 @@ use std::cell::RefCell;
 use crate::component::Component;
 use crate::scheduler::pipeline::PipelineStage;
 use crate::storage::storage::{Storage};
-use crate::system::System;
 
 pub struct World {
     pub storages: [MaybeUninit<Box<dyn Any>>; 128],

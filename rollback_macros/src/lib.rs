@@ -1,6 +1,7 @@
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
-use syn::{braced, parse::{Parse, ParseStream}, parse_macro_input, Block, Ident, Result, Token, Type};
+use std::collections::HashMap;
+use syn::{braced, parse::{Parse, ParseStream}, parse_macro_input, Block, DeriveInput, Ident, Result, Token, Type};
 
 struct ViewArg { ident: Ident, ty: Type, is_mut: bool }
 
@@ -52,6 +53,7 @@ struct SystemInput {
     all_types: Vec<Type>,
     none_types: Vec<Type>,
     any_types: Vec<Type>,
+    remove_types: Vec<Type>,
     body: Block,
 }
 
@@ -79,6 +81,7 @@ impl Parse for SystemInput {
         let mut all_types = Vec::new();
         let mut none_types = Vec::new();
         let mut any_types = Vec::new();
+        let mut remove_types = Vec::new();
         while inner.peek(Ident) {
             let kw: Ident = inner.parse()?;
             if kw == "All" {
@@ -90,10 +93,13 @@ impl Parse for SystemInput {
             } else if kw == "Any" {
                 inner.parse::<Token![=]>()?;
                 any_types = parse_type_list_bracketed(&inner)?;
+            } else if kw == "Remove" {
+                inner.parse::<Token![=]>()?;
+                remove_types = parse_type_list_bracketed(&inner)?;
             } else { break; }
         }
         let body: Block = inner.parse()?;
-        Ok(SystemInput { stage_ident, fn_ident, view_args, all_types, none_types, any_types, body })
+        Ok(SystemInput { stage_ident, fn_ident, view_args, all_types, none_types, any_types, remove_types, body })
     }
 }
 
@@ -102,57 +108,95 @@ pub fn system(input: TokenStream) -> TokenStream {
     let parsed = parse_macro_input!(input as SystemInput);
 
     let stage_ident = parsed.stage_ident;
-    let fn_ident = parsed.fn_ident;
+    let _fn_ident = parsed.fn_ident;
     let view_args = parsed.view_args;
     let all_types = parsed.all_types;
     let none_types = parsed.none_types;
     let any_types = parsed.any_types;
-    let body = parsed.body;
+    let remove_types = parsed.remove_types;
+    let _body = parsed.body;
 
-    let view_idents: Vec<Ident> = view_args.iter().map(|v| v.ident.clone()).collect();
     let view_types: Vec<Type> = view_args.iter().map(|v| v.ty.clone()).collect();
 
-    let all_idents: Vec<Ident> = (0..all_types.len()).map(|i| format_ident!("all_s{}", i+1)).collect();
-    let none_idents: Vec<Ident> = (0..none_types.len()).map(|i| format_ident!("none_s{}", i+1)).collect();
-    let any_idents: Vec<Ident> = (0..any_types.len()).map(|i| format_ident!("any_s{}", i+1)).collect();
+    // Build unique storage set per type with mutability if any usage requires it
+    let mut unique_types: Vec<Type> = Vec::new();
+    let mut unique_mut_flags: Vec<bool> = Vec::new();
+    let mut type_index: HashMap<String, usize> = HashMap::new();
+    let requires_mut = |t: &Type| -> bool {
+        let key = quote!(#t).to_string();
+        remove_types.iter().any(|rt| quote!(#rt).to_string() == key)
+            || view_args.iter().any(|va| va.is_mut && quote!(#(&va.ty)).to_string() == key)
+    };
+    let mut push_unique = |t: &Type| {
+        let key = quote!(#t).to_string();
+        if !type_index.contains_key(&key) {
+            let idx = unique_types.len();
+            unique_types.push(t.clone());
+            unique_mut_flags.push(requires_mut(t));
+            type_index.insert(key, idx);
+        } else {
+            // upgrade to mutable if new usage requires mut
+            let idx = *type_index.get(&key).unwrap();
+            if requires_mut(t) { unique_mut_flags[idx] = true; }
+        }
+    };
+    for t in &none_types { push_unique(t); }
+    for t in &all_types { push_unique(t); }
+    for t in &any_types { push_unique(t); }
+    for t in &remove_types { push_unique(t); }
+    for t in &view_types { push_unique(t); }
+    let unique_idents: Vec<Ident> = (0..unique_types.len()).map(|i| format_ident!("storage{}", i+1)).collect();
 
-    let all_storage_field_idents: Vec<Ident> = (0..all_types.len()).map(|i| format_ident!("all_storage{}", i+1)).collect();
-    let none_storage_field_idents: Vec<Ident> = (0..none_types.len()).map(|i| format_ident!("none_storage{}", i+1)).collect();
-    let any_storage_field_idents: Vec<Ident> = (0..any_types.len()).map(|i| format_ident!("any_storage{}", i+1)).collect();
+    let resolve_storage_ident = |t: &Type| -> Ident {
+        let key = quote!(#t).to_string();
+        let idx = type_index.get(&key).cloned().unwrap_or(0);
+        unique_idents[idx].clone()
+    };
 
-    let fn_inputs = view_args.iter().map(|va| {
+    let view_storage_idents: Vec<Ident> = view_types.iter().map(resolve_storage_ident).collect();
+    let all_storage_idents: Vec<Ident> = all_types.iter().map(resolve_storage_ident).collect();
+    let none_storage_idents: Vec<Ident> = none_types.iter().map(resolve_storage_ident).collect();
+    let any_storage_idents: Vec<Ident> = any_types.iter().map(resolve_storage_ident).collect();
+    let remove_storage_idents: Vec<Ident> = remove_types.iter().map(resolve_storage_ident).collect();
+
+    // Deprecated per-type field idents; using unique storages instead
+
+    let _fn_inputs = view_args.iter().map(|va| {
         let vi = &va.ident; let ty = &va.ty;
         if va.is_mut { quote!(#vi: crate::storage::view::ViewMut<#ty>) } else { quote!(#vi: crate::storage::view::View<#ty>) }
     });
-    let fn_def = quote! { fn #fn_ident( #(#fn_inputs),* ) #body };
+    // No function definition needed - removal handled automatically by macro
 
-    let none_tuple_types = none_types.iter().map(|t| quote!(&crate::storage::storage::Storage<#t>));
-    let all_tuple_types = all_types.iter().map(|t| quote!(&crate::storage::storage::Storage<#t>));
-    let any_tuple_types = any_types.iter().map(|t| quote!(&crate::storage::storage::Storage<#t>));
-    let view_tuple_types_mixed = view_args.iter().map(|va| {
-        let t = &va.ty;
-        if va.is_mut { quote!(&mut crate::storage::storage::Storage<#t>) } else { quote!(&crate::storage::storage::Storage<#t>) }
+    // Tuple type: one per unique type with mutability as required
+    let unique_tuple_types = unique_types.iter().enumerate().map(|(i, t)| {
+        if unique_mut_flags[i] { quote!(&mut crate::storage::storage::Storage<#t>) } else { quote!(&crate::storage::storage::Storage<#t>) }
     });
-    let mut args_tuple_segs: Vec<proc_macro2::TokenStream> = Vec::new();
-    if !none_types.is_empty() { args_tuple_segs.push(quote!( #( #none_tuple_types ),* )); }
-    if !all_types.is_empty() { args_tuple_segs.push(quote!( #( #all_tuple_types ),* )); }
-    if !any_types.is_empty() { args_tuple_segs.push(quote!( #( #any_tuple_types ),* )); }
-    args_tuple_segs.push(quote!( #( #view_tuple_types_mixed ),* ));
-    let args_tuple_type = quote!( ( #(#args_tuple_segs),* ) );
+    let _args_tuple_type = quote!( ( #( #unique_tuple_types ),* ) );
 
-    let mut destructure_segs: Vec<proc_macro2::TokenStream> = Vec::new();
-    if !none_types.is_empty() { destructure_segs.push(quote!( #( #none_idents ),* )); }
-    if !all_types.is_empty() { destructure_segs.push(quote!( #( #all_idents ),* )); }
-    if !any_types.is_empty() { destructure_segs.push(quote!( #( #any_idents ),* )); }
-    destructure_segs.push(quote!( #( #view_idents ),* ));
-    let args_destructure = quote!( let ( #(#destructure_segs),* ) = args; );
+    // Destructure into unique storages only
+    let _args_destructure = quote!( let ( #( #unique_idents ),* ) = args; );
 
-    let outer_intersections = quote!( #( outer_mask &= #view_idents.root.presence_mask; )* );
-    let middle_intersections_views = quote!( #( middle_mask &= unsafe { #view_idents.root.data[oi as usize].assume_init_ref().presence_mask }; )* );
-    let inner_intersections_views = quote!( #( inner_mask &= unsafe { #view_idents.root.data[oi as usize].assume_init_ref().data[mi as usize].assume_init_ref().presence_mask }; )* );
+    // Bind category aliases from unique storages - use reborrowing to avoid conflicts
 
-    let middle_all = if all_types.is_empty() { quote!() } else {
-        let per_all = all_idents.iter().map(|ai| {
+
+    let outer_intersections = quote!(
+        #( outer_mask &= #view_storage_idents.root.presence_mask; )*
+        #( outer_mask &= #all_storage_idents.root.presence_mask; )*
+        #( outer_mask &= #remove_storage_idents.root.presence_mask; )*
+    );
+    let middle_intersections_views = quote!(
+        #( middle_mask &= unsafe { #view_storage_idents.root.data[oi as usize].assume_init_ref().presence_mask }; )*
+        #( middle_mask &= unsafe { #all_storage_idents.root.data[oi as usize].assume_init_ref().presence_mask }; )*
+        #( middle_mask &= unsafe { #remove_storage_idents.root.data[oi as usize].assume_init_ref().presence_mask }; )*
+    );
+    let inner_intersections_views = quote!(
+        #( inner_mask &= unsafe { #view_storage_idents.root.data[oi as usize].assume_init_ref().data[mi as usize].assume_init_ref().presence_mask }; )*
+        #( inner_mask &= unsafe { #all_storage_idents.root.data[oi as usize].assume_init_ref().data[mi as usize].assume_init_ref().presence_mask }; )*
+        #( inner_mask &= unsafe { #remove_storage_idents.root.data[oi as usize].assume_init_ref().data[mi as usize].assume_init_ref().presence_mask }; )*
+    );
+
+    let middle_all = if all_types.is_empty() && remove_types.is_empty() { quote!() } else {
+        let per_all_regular = all_storage_idents.iter().map(|ai| {
             quote! {
                 let rp = #ai.root.presence_mask;
                 let mut all_mid_single: u128 = u128::MAX;
@@ -163,11 +207,22 @@ pub fn system(input: TokenStream) -> TokenStream {
                 all_mid &= all_mid_single;
             }
         });
-        quote! { let mut all_mid: u128 = u128::MAX; #(#per_all)* middle_mask &= all_mid; }
+        let per_all_remove = remove_storage_idents.iter().map(|ri| {
+            quote! {
+                let rp = #ri.root.presence_mask;
+                let mut all_mid_single: u128 = u128::MAX;
+                if ((rp >> oi) & 1) != 0 {
+                    let ab = unsafe { #ri.root.data[oi as usize].assume_init_ref() };
+                    all_mid_single &= ab.presence_mask;
+                } else { all_mid_single &= 0; }
+                all_mid &= all_mid_single;
+            }
+        });
+        quote! { let mut all_mid: u128 = u128::MAX; #(#per_all_regular)* #(#per_all_remove)* middle_mask &= all_mid; }
     };
 
     let middle_none = if none_types.is_empty() { quote!() } else {
-        let per_none = none_idents.iter().map(|ni| {
+        let per_none = none_storage_idents.iter().map(|ni| {
             quote! {
                 let rp = #ni.root.presence_mask;
                 if ((rp >> oi) & 1) != 0 {
@@ -180,7 +235,7 @@ pub fn system(input: TokenStream) -> TokenStream {
     };
 
     let middle_any = if any_types.is_empty() { quote!() } else {
-        let per_any = any_idents.iter().map(|ai| {
+        let per_any = any_storage_idents.iter().map(|ai| {
             quote! {
                 let rp = #ai.root.presence_mask;
                 if ((rp >> oi) & 1) != 0 {
@@ -192,8 +247,8 @@ pub fn system(input: TokenStream) -> TokenStream {
         quote! { let mut any_mid: u128 = 0; #(#per_any)* middle_mask &= any_mid; }
     };
 
-    let inner_all = if all_types.is_empty() { quote!() } else {
-        let per_all = all_idents.iter().map(|ai| {
+    let inner_all = if all_types.is_empty() && remove_types.is_empty() { quote!() } else {
+        let per_all_regular = all_storage_idents.iter().map(|ai| {
             quote! {
                 let ab = unsafe { #ai.root.data[oi as usize].assume_init_ref() };
                 let mp = ab.presence_mask;
@@ -205,11 +260,23 @@ pub fn system(input: TokenStream) -> TokenStream {
                 all_in &= all_in_single;
             }
         });
-        quote! { let mut all_in: u128 = u128::MAX; #(#per_all)* inner_mask &= all_in; }
+        let per_all_remove = remove_storage_idents.iter().map(|ri| {
+            quote! {
+                let ab = unsafe { #ri.root.data[oi as usize].assume_init_ref() };
+                let mp = ab.presence_mask;
+                let mut all_in_single: u128 = u128::MAX;
+                if ((mp >> mi) & 1) != 0 {
+                    let ib = unsafe { ab.data[mi as usize].assume_init_ref() };
+                    all_in_single &= ib.presence_mask;
+                } else { all_in_single &= 0; }
+                all_in &= all_in_single;
+            }
+        });
+        quote! { let mut all_in: u128 = u128::MAX; #(#per_all_regular)* #(#per_all_remove)* inner_mask &= all_in; }
     };
 
     let inner_none = if none_types.is_empty() { quote!() } else {
-        let per_none = none_idents.iter().map(|ni| {
+        let per_none = none_storage_idents.iter().map(|ni| {
             quote! {
                 let nb = unsafe { #ni.root.data[oi as usize].assume_init_ref() };
                 let mp = nb.presence_mask;
@@ -223,7 +290,7 @@ pub fn system(input: TokenStream) -> TokenStream {
     };
 
     let inner_any = if any_types.is_empty() { quote!() } else {
-        let per_any = any_idents.iter().enumerate().map(|(i, ai)| {
+        let per_any = any_storage_idents.iter().enumerate().map(|(i, ai)| {
             quote! {
                 let rp = #ai.root.presence_mask;
                 {
@@ -267,55 +334,106 @@ pub fn system(input: TokenStream) -> TokenStream {
         }
     };
 
-    let call_views = {
-        let view_slices = view_args.iter().map(|va| {
-            let vi = &va.ident; let ty = &va.ty;
-            if va.is_mut {
+    let call_views = quote!();
+
+    let remove_components = if !remove_types.is_empty() {
+        let remove_logic = remove_types.iter().enumerate().map(|(i, t)| {
+            let ident = &remove_storage_idents[i];
+            let ty_str = quote!(#t).to_string();
+            if ty_str.ends_with("Entity") {
                 quote! {
-                    crate::storage::view::ViewMut {
-                        data: unsafe {
-                            let ptr = #vi.root.data[oi as usize]
-                                .assume_init_ref()
-                                .data[mi as usize]
-                                .assume_init_ref()
-                                .data
-                                .as_ptr() as *mut #ty;
-                            std::slice::from_raw_parts_mut(ptr.add(start as usize), run as usize)
+                    {
+                        let root = &mut #ident.root;
+                        if ((root.presence_mask >> oi) & 1) != 0 {
+                            let middle = unsafe { root.data[oi as usize].assume_init_mut() };
+                            if ((middle.presence_mask >> mi) & 1) != 0 {
+                                let inner = unsafe { middle.data[mi as usize].assume_init_mut() };
+                                let ptr = inner.data.as_ptr();
+                                let mut mask = range_mask & inner.presence_mask;
+                                while mask != 0 {
+                                    let ii = mask.trailing_zeros();
+                                    unsafe { ptr.add(ii as usize).read().assume_init_drop(); }
+                                    mask &= !(1u128 << ii);
+                                }
+                                inner.presence_mask &= !range_mask;
+                                inner.absence_mask |= range_mask;
+                                if inner.absence_mask != u128::MAX {
+                                    middle.absence_mask &= !(1u128 << mi);
+                                }
+                                if middle.absence_mask != u128::MAX {
+                                    root.absence_mask &= !(1u128 << oi);
+                                }
+                            }
                         }
                     }
                 }
             } else {
                 quote! {
-                    crate::storage::view::View {
-                        data: unsafe {
-                            let ptr = #vi.root.data[oi as usize]
-                                .assume_init_ref()
-                                .data[mi as usize]
-                                .assume_init_ref()
-                                .data
-                                .as_ptr() as *const #ty;
-                            std::slice::from_raw_parts(ptr.add(start as usize), run as usize)
+                    {
+                        let root = &mut #ident.root;
+                        if ((root.presence_mask >> oi) & 1) != 0 {
+                            let middle = unsafe { root.data[oi as usize].assume_init_mut() };
+                            if ((middle.presence_mask >> mi) & 1) != 0 {
+                                let inner = unsafe { middle.data[mi as usize].assume_init_mut() };
+                                inner.presence_mask &= !range_mask;
+                                inner.absence_mask |= range_mask;
+                                if inner.absence_mask != u128::MAX {
+                                    middle.absence_mask &= !(1u128 << mi);
+                                }
+                                if middle.absence_mask != u128::MAX {
+                                    root.absence_mask &= !(1u128 << oi);
+                                }
+                            }
                         }
                     }
                 }
             }
         });
-        quote!( self( #( #view_slices ),* ); )
-    };
+        quote! { #(#remove_logic)* }
+    } else { quote!() };
 
-    let fn_arg_types = view_args.iter().map(|va| {
-        let t = &va.ty;
-        if va.is_mut { quote!(crate::storage::view::ViewMut<#t>) } else { quote!(crate::storage::view::View<#t>) }
-    });
-    let fn_arg_types_run = view_args.iter().map(|va| {
-        let t = &va.ty;
-        if va.is_mut { quote!(crate::storage::view::ViewMut<#t>) } else { quote!(crate::storage::view::View<#t>) }
+
+
+    // Stage fields: one per unique type
+    let struct_fields_unique = unique_types.iter().enumerate().map(|(i, t)| {
+        let id = &unique_idents[i];
+        quote!( pub #id: std::rc::Rc<std::cell::RefCell<crate::storage::storage::Storage<#t>>> , )
     });
 
-    let query_impl = quote! {
-        impl crate::system::Query<#args_tuple_type> for fn( #( #fn_arg_types ),* ) {
-            fn run(&self, args: #args_tuple_type ) {
-                #args_destructure
+    // Build run args from unique storages (borrow references)
+
+
+    // Borrow once per unique type into locals - always borrow mutably if any usage requires it
+    let borrow_locals: Vec<proc_macro2::TokenStream> = unique_types.iter().enumerate().map(|(i, _)| {
+        let id = &unique_idents[i];
+        if unique_mut_flags[i] { 
+            quote!( let mut #id = self.#id.borrow_mut(); ) 
+        } else { 
+            quote!( let #id = self.#id.borrow(); ) 
+        }
+    }).collect();
+    
+
+
+    let create_fields_unique = unique_types.iter().enumerate().map(|(i, t)| {
+        let id = &unique_idents[i]; quote!( #id: world.get::<#t>() )
+    });
+
+    let reads_unique = unique_types.iter().enumerate().filter_map(|(i, t)| {
+        if unique_mut_flags[i] { None } else { Some(quote!( std::any::TypeId::of::<#t>() )) }
+    });
+    let writes_unique = unique_types.iter().enumerate().filter_map(|(i, t)| {
+        if unique_mut_flags[i] { Some(quote!( std::any::TypeId::of::<#t>() )) } else { None }
+    });
+
+    // query_impl defined above with full implementation
+
+    let expanded = quote! {
+        pub struct #stage_ident { #( #struct_fields_unique )* }
+        impl crate::scheduler::pipeline::PipelineStage for #stage_ident {
+            fn run(&self) {
+                #( #borrow_locals )*
+
                 let mut outer_mask: u128 = u128::MAX;
                 #outer_intersections
                 while outer_mask != 0 {
@@ -337,6 +455,7 @@ pub fn system(input: TokenStream) -> TokenStream {
                             let run = (inner_mask >> start).trailing_ones();
                             #call_views
                             let range_mask = if run == 128 { u128::MAX } else { ((1u128 << run) - 1) << start };
+                            #remove_components
                             inner_mask &= !range_mask;
                         }
                         middle_mask &= !(1u128 << mi);
@@ -344,92 +463,18 @@ pub fn system(input: TokenStream) -> TokenStream {
                     outer_mask &= !(1u128 << oi);
                 }
             }
-        }
-    };
-
-    let struct_fields_all = all_types.iter().enumerate().map(|(i, t)| {
-        let id = &all_storage_field_idents[i];
-        quote!( pub #id: std::rc::Rc<std::cell::RefCell<crate::storage::storage::Storage<#t>>> , )
-    });
-    let struct_fields_none = none_types.iter().enumerate().map(|(i, t)| {
-        let id = &none_storage_field_idents[i];
-        quote!( pub #id: std::rc::Rc<std::cell::RefCell<crate::storage::storage::Storage<#t>>> , )
-    });
-    let struct_fields_any = any_types.iter().enumerate().map(|(i, t)| {
-        let id = &any_storage_field_idents[i];
-        quote!( pub #id: std::rc::Rc<std::cell::RefCell<crate::storage::storage::Storage<#t>>> , )
-    });
-    let struct_fields_views = view_types.iter().enumerate().map(|(i, t)| {
-        let id = &view_idents[i];
-        quote!( pub #id: std::rc::Rc<std::cell::RefCell<crate::storage::storage::Storage<#t>>> , )
-    });
-
-    let run_args_none = none_storage_field_idents.iter().map(|id| quote!(&*self.#id.borrow()));
-    let run_args_all = all_storage_field_idents.iter().map(|id| quote!(&*self.#id.borrow()));
-    let run_args_any = any_storage_field_idents.iter().map(|id| quote!(&*self.#id.borrow()));
-    let run_args_views_mixed = view_args.iter().map(|va| {
-        let id = &va.ident; if va.is_mut { quote!(&mut *self.#id.borrow_mut()) } else { quote!(&*self.#id.borrow()) }
-    });
-    let mut run_args_segs: Vec<proc_macro2::TokenStream> = Vec::new();
-    if !none_types.is_empty() { run_args_segs.push(quote!( #( #run_args_none ),* )); }
-    if !all_types.is_empty() { run_args_segs.push(quote!( #( #run_args_all ),* )); }
-    if !any_types.is_empty() { run_args_segs.push(quote!( #( #run_args_any ),* )); }
-    run_args_segs.push(quote!( #( #run_args_views_mixed ),* ));
-
-    let create_fields_none = none_types.iter().enumerate().map(|(i, t)| {
-        let id = &none_storage_field_idents[i]; quote!( #id: world.get::<#t>() )
-    });
-    let create_fields_all = all_types.iter().enumerate().map(|(i, t)| {
-        let id = &all_storage_field_idents[i]; quote!( #id: world.get::<#t>() )
-    });
-    let create_fields_any = any_types.iter().enumerate().map(|(i, t)| {
-        let id = &any_storage_field_idents[i]; quote!( #id: world.get::<#t>() )
-    });
-    let create_fields_views = view_types.iter().enumerate().map(|(i, t)| {
-        let id = &view_idents[i]; quote!( #id: world.get::<#t>() )
-    });
-    let mut create_segs: Vec<proc_macro2::TokenStream> = Vec::new();
-    if !none_types.is_empty() { create_segs.push(quote!( #( #create_fields_none ),* )); }
-    if !all_types.is_empty() { create_segs.push(quote!( #( #create_fields_all ),* )); }
-    if !any_types.is_empty() { create_segs.push(quote!( #( #create_fields_any ),* )); }
-    create_segs.push(quote!( #( #create_fields_views ),* ));
-
-    let reads_types = none_types.iter().map(|t| quote!( std::any::TypeId::of::<#t>() ));
-    let reads_types_all = all_types.iter().map(|t| quote!( std::any::TypeId::of::<#t>() ));
-    let reads_types_any = any_types.iter().map(|t| quote!( std::any::TypeId::of::<#t>() ));
-    let reads_types_views = view_args.iter().filter(|va| !va.is_mut).map(|va| {
-        let t = &va.ty; quote!( std::any::TypeId::of::<#t>() )
-    });
-    let writes_types_views = view_args.iter().filter(|va| va.is_mut).map(|va| {
-        let t = &va.ty; quote!( std::any::TypeId::of::<#t>() )
-    });
-    let mut reads_segs: Vec<proc_macro2::TokenStream> = Vec::new();
-    if !none_types.is_empty() { reads_segs.push(quote!( #( #reads_types ),* )); }
-    if !all_types.is_empty() { reads_segs.push(quote!( #( #reads_types_all ),* )); }
-    if !any_types.is_empty() { reads_segs.push(quote!( #( #reads_types_any ),* )); }
-    reads_segs.push(quote!( #( #reads_types_views ),* ));
-
-    let expanded = quote! {
-        #fn_def
-        pub struct #stage_ident { #( #struct_fields_none )* #( #struct_fields_all )* #( #struct_fields_any )* #( #struct_fields_views )* }
-        impl crate::scheduler::pipeline::PipelineStage for #stage_ident {
-            fn run(&self) {
-                let sys: fn( #( #fn_arg_types_run ),* ) = #fn_ident;
-                crate::system::Query::run(&sys, ( #(#run_args_segs),* ));
-            }
             fn create(world: &mut crate::world::World) -> Self {
-                Self { #(#create_segs),* }
+                Self { #( #create_fields_unique ),* }
             }
             fn reads(&self) -> &'static [std::any::TypeId] {
-                static READS: &[std::any::TypeId] = &[ #(#reads_segs),* ];
+                static READS: &[std::any::TypeId] = &[ #( #reads_unique ),* ];
                 READS
             }
             fn writes(&self) -> &'static [std::any::TypeId] {
-                static WRITES: &[std::any::TypeId] = &[ #( #writes_types_views ),* ];
+                static WRITES: &[std::any::TypeId] = &[ #( #writes_unique ),* ];
                 WRITES
             }
         }
-        #query_impl
     };
 
     TokenStream::from(expanded)
@@ -437,11 +482,21 @@ pub fn system(input: TokenStream) -> TokenStream {
 
 #[proc_macro_derive(Component)]
 pub fn component_derive(input: TokenStream) -> TokenStream {
-    let ast = parse_macro_input!(input as syn::DeriveInput);
+    let ast = parse_macro_input!(input as DeriveInput);
     let name = &ast.ident;
+    let static_name = syn::Ident::new(&format!("ID_{}", name), name.span());
+
     let gen = quote! {
-        impl crate::component::Component for #name {}
+        // 2️⃣ Implement Component trait
+        impl crate::component::Component for #name {
+            fn type_index() -> usize {
+                static TYPE_INDEX: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+
+                *TYPE_INDEX.get_or_init(|| crate::component::next_id())
+            }
+        }
     };
+
     gen.into()
 }
 
