@@ -92,6 +92,13 @@ impl<T> Storage<T> {
         // Update presence and absence masks
         inner.presence_mask |= 1 << ii;
         inner.absence_mask |= 1 << ii;
+        
+        // Mark as changed
+        inner.changed_mask |= 1 << ii;
+        
+        // Propagate changed_mask up the hierarchy
+        middle.changed_mask |= 1 << mi;
+        root.changed_mask |= 1 << ri;
     }
 }
 
@@ -602,5 +609,57 @@ mod tests {
         }
         verify_tree_invariants(&storage);
         assert_eq!(storage.len(), 20);
+    }
+
+    #[test]
+    fn test_changed_mask_propagation() {
+        use crate::component::Destroyed;
+        
+        let mut storage = Storage::<Destroyed>::new();
+
+        // Initially, all changed_masks should be 0
+        assert_eq!(storage.root.changed_mask, 0);
+
+        // Set a value at index 0 (ri=0, mi=0, ii=0)
+        storage.set(0, &Destroyed{});
+
+        // Verify changed_mask is set at all levels
+        let root = &storage.root;
+        assert_eq!(root.changed_mask & 1, 1, "Root changed_mask bit 0 should be set");
+
+        let middle = unsafe { root.data[0].assume_init_ref() };
+        assert_eq!(middle.changed_mask & 1, 1, "Middle changed_mask bit 0 should be set");
+
+        let inner = unsafe { middle.data[0].assume_init_ref() };
+        assert_eq!(inner.changed_mask & 1, 1, "Inner changed_mask bit 0 should be set");
+
+        // Set another value in the same inner block (ri=0, mi=0, ii=5)
+        storage.set(5, &Destroyed{});
+
+        let root = &storage.root;
+        let middle = unsafe { root.data[0].assume_init_ref() };
+        let inner = unsafe { middle.data[0].assume_init_ref() };
+
+        assert_eq!(inner.changed_mask & (1 << 5), 1 << 5, "Inner changed_mask bit 5 should be set");
+        assert_eq!(inner.changed_mask & 1, 1, "Inner changed_mask bit 0 should still be set");
+
+        // Set a value in a different middle block (ri=0, mi=1, ii=0) -> index 128
+        storage.set(128, &Destroyed{});
+
+        let root = &storage.root;
+        assert_eq!(root.changed_mask & 1, 1, "Root changed_mask bit 0 should still be set");
+
+        let middle1 = unsafe { root.data[0].assume_init_ref() };
+        assert_eq!(middle1.changed_mask & (1 << 1), 1 << 1, "Middle changed_mask bit 1 should be set");
+
+        let inner1 = unsafe { middle1.data[1].assume_init_ref() };
+        assert_eq!(inner1.changed_mask & 1, 1, "Second inner changed_mask bit 0 should be set");
+
+        // Set a value in a different root block (ri=1, mi=0, ii=0) -> index 16384
+        storage.set(16384, &Destroyed{});
+
+        let root = &storage.root;
+        assert_eq!(root.changed_mask & (1 << 1), 1 << 1, "Root changed_mask bit 1 should be set");
+        assert_eq!(root.changed_mask & 1, 1, "Root changed_mask bit 0 should still be set");
     }
 }
