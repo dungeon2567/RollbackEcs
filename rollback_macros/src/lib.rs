@@ -187,18 +187,74 @@ pub fn system(input: TokenStream) -> TokenStream {
     // Bind category aliases from unique storages - use reborrowing to avoid conflicts
 
 
-    let outer_intersections = quote!(
-        #( outer_mask &= #view_storage_idents.root.presence_mask; )*
-        #( outer_mask &= #all_storage_idents.root.presence_mask; )*
-    );
-    let middle_intersections_views = quote!(
-        #( middle_mask &= unsafe { #view_storage_idents.root.data[oi as usize].assume_init_ref().presence_mask }; )*
-        #( middle_mask &= unsafe { #all_storage_idents.root.data[oi as usize].assume_init_ref().presence_mask }; )*
-    );
-    let inner_intersections_views = quote!(
-        #( inner_mask &= unsafe { #view_storage_idents.root.data[oi as usize].assume_init_ref().data[mi as usize].assume_init_ref().presence_mask }; )*
-        #( inner_mask &= unsafe { #all_storage_idents.root.data[oi as usize].assume_init_ref().data[mi as usize].assume_init_ref().presence_mask }; )*
-    );
+    let outer_intersections = {
+        let view_intersections = view_storage_idents.iter().enumerate().map(|(i, si)| {
+            let ty = &view_types[i];
+            let ty_key = quote!(#ty).to_string();
+            // Check if this type is also in changed_types
+            let is_changed = changed_types.iter().any(|ct| quote!(#ct).to_string() == ty_key);
+            
+            if is_changed {
+                // Use presence & changed_mask for types that are in Changed filter
+                quote!( outer_mask &= #si.root.presence_mask & #si.root.changed_mask; )
+            } else {
+                quote!( outer_mask &= #si.root.presence_mask; )
+            }
+        });
+        
+        let all_intersections = all_storage_idents.iter().map(|si| {
+            quote!( outer_mask &= #si.root.presence_mask; )
+        });
+        
+        quote! {
+            #( #view_intersections )*
+            #( #all_intersections )*
+        }
+    };
+    let middle_intersections_views = {
+        let view_intersections = view_storage_idents.iter().enumerate().map(|(i, si)| {
+            let ty = &view_types[i];
+            let ty_key = quote!(#ty).to_string();
+            let is_changed = changed_types.iter().any(|ct| quote!(#ct).to_string() == ty_key);
+            
+            if is_changed {
+                quote!( middle_mask &= unsafe { #si.root.data[oi as usize].assume_init_ref().presence_mask & #si.root.data[oi as usize].assume_init_ref().changed_mask }; )
+            } else {
+                quote!( middle_mask &= unsafe { #si.root.data[oi as usize].assume_init_ref().presence_mask }; )
+            }
+        });
+        
+        let all_intersections = all_storage_idents.iter().map(|si| {
+            quote!( middle_mask &= unsafe { #si.root.data[oi as usize].assume_init_ref().presence_mask }; )
+        });
+        
+        quote! {
+            #( #view_intersections )*
+            #( #all_intersections )*
+        }
+    };
+    let inner_intersections_views = {
+        let view_intersections = view_storage_idents.iter().enumerate().map(|(i, si)| {
+            let ty = &view_types[i];
+            let ty_key = quote!(#ty).to_string();
+            let is_changed = changed_types.iter().any(|ct| quote!(#ct).to_string() == ty_key);
+            
+            if is_changed {
+                quote!( inner_mask &= unsafe { #si.root.data[oi as usize].assume_init_ref().data[mi as usize].assume_init_ref().presence_mask & #si.root.data[oi as usize].assume_init_ref().data[mi as usize].assume_init_ref().changed_mask }; )
+            } else {
+                quote!( inner_mask &= unsafe { #si.root.data[oi as usize].assume_init_ref().data[mi as usize].assume_init_ref().presence_mask }; )
+            }
+        });
+        
+        let all_intersections = all_storage_idents.iter().map(|si| {
+            quote!( inner_mask &= unsafe { #si.root.data[oi as usize].assume_init_ref().data[mi as usize].assume_init_ref().presence_mask }; )
+        });
+        
+        quote! {
+            #( #view_intersections )*
+            #( #all_intersections )*
+        }
+    };
 
     let middle_all = if all_types.is_empty() { quote!() } else {
         let per_all_regular = all_storage_idents.iter().map(|ai| {
