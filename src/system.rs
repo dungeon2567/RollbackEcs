@@ -14,6 +14,7 @@ system! {
     }
 }
 
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -51,6 +52,7 @@ mod tests {
     #[test]
     fn destroy_system_removes_entity_and_tag() {
         let mut world = World::new();
+
         let ents = world.get::<Entity>();
         let destroyed = world.get::<Destroyed>();
 
@@ -62,6 +64,7 @@ mod tests {
         assert_eq!(destroyed.borrow().len(), 0);
 
         destroyed.borrow_mut().set(e1.index(), &Destroyed{});
+
         assert_eq!(destroyed.borrow().len(), 1);
 
         world.run::<DestroySystem>();

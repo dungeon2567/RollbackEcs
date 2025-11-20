@@ -1,4 +1,5 @@
 use std::mem::MaybeUninit;
+use crate::component::Component;
 use crate::tick::Tick;
 
 pub struct Block<T> {
@@ -8,7 +9,7 @@ pub struct Block<T> {
     pub data: [MaybeUninit<T>; 128]
 }
 
-pub struct RollbackBlock<'a, T> {
+pub struct SnapshotBlock<'a, T> {
     pub presence_mask: u128,
     pub absence_mask: u128,
     pub tick: Tick,

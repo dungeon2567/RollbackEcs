@@ -182,20 +182,17 @@ pub fn system(input: TokenStream) -> TokenStream {
     let outer_intersections = quote!(
         #( outer_mask &= #view_storage_idents.root.presence_mask; )*
         #( outer_mask &= #all_storage_idents.root.presence_mask; )*
-        #( outer_mask &= #remove_storage_idents.root.presence_mask; )*
     );
     let middle_intersections_views = quote!(
         #( middle_mask &= unsafe { #view_storage_idents.root.data[oi as usize].assume_init_ref().presence_mask }; )*
         #( middle_mask &= unsafe { #all_storage_idents.root.data[oi as usize].assume_init_ref().presence_mask }; )*
-        #( middle_mask &= unsafe { #remove_storage_idents.root.data[oi as usize].assume_init_ref().presence_mask }; )*
     );
     let inner_intersections_views = quote!(
         #( inner_mask &= unsafe { #view_storage_idents.root.data[oi as usize].assume_init_ref().data[mi as usize].assume_init_ref().presence_mask }; )*
         #( inner_mask &= unsafe { #all_storage_idents.root.data[oi as usize].assume_init_ref().data[mi as usize].assume_init_ref().presence_mask }; )*
-        #( inner_mask &= unsafe { #remove_storage_idents.root.data[oi as usize].assume_init_ref().data[mi as usize].assume_init_ref().presence_mask }; )*
     );
 
-    let middle_all = if all_types.is_empty() && remove_types.is_empty() { quote!() } else {
+    let middle_all = if all_types.is_empty() { quote!() } else {
         let per_all_regular = all_storage_idents.iter().map(|ai| {
             quote! {
                 let rp = #ai.root.presence_mask;
@@ -207,18 +204,7 @@ pub fn system(input: TokenStream) -> TokenStream {
                 all_mid &= all_mid_single;
             }
         });
-        let per_all_remove = remove_storage_idents.iter().map(|ri| {
-            quote! {
-                let rp = #ri.root.presence_mask;
-                let mut all_mid_single: u128 = u128::MAX;
-                if ((rp >> oi) & 1) != 0 {
-                    let ab = unsafe { #ri.root.data[oi as usize].assume_init_ref() };
-                    all_mid_single &= ab.presence_mask;
-                } else { all_mid_single &= 0; }
-                all_mid &= all_mid_single;
-            }
-        });
-        quote! { let mut all_mid: u128 = u128::MAX; #(#per_all_regular)* #(#per_all_remove)* middle_mask &= all_mid; }
+        quote! { let mut all_mid: u128 = u128::MAX; #(#per_all_regular)* middle_mask &= all_mid; }
     };
 
     let middle_none = if none_types.is_empty() { quote!() } else {
@@ -247,7 +233,7 @@ pub fn system(input: TokenStream) -> TokenStream {
         quote! { let mut any_mid: u128 = 0; #(#per_any)* middle_mask &= any_mid; }
     };
 
-    let inner_all = if all_types.is_empty() && remove_types.is_empty() { quote!() } else {
+    let inner_all = if all_types.is_empty() { quote!() } else {
         let per_all_regular = all_storage_idents.iter().map(|ai| {
             quote! {
                 let ab = unsafe { #ai.root.data[oi as usize].assume_init_ref() };
@@ -260,19 +246,7 @@ pub fn system(input: TokenStream) -> TokenStream {
                 all_in &= all_in_single;
             }
         });
-        let per_all_remove = remove_storage_idents.iter().map(|ri| {
-            quote! {
-                let ab = unsafe { #ri.root.data[oi as usize].assume_init_ref() };
-                let mp = ab.presence_mask;
-                let mut all_in_single: u128 = u128::MAX;
-                if ((mp >> mi) & 1) != 0 {
-                    let ib = unsafe { ab.data[mi as usize].assume_init_ref() };
-                    all_in_single &= ib.presence_mask;
-                } else { all_in_single &= 0; }
-                all_in &= all_in_single;
-            }
-        });
-        quote! { let mut all_in: u128 = u128::MAX; #(#per_all_regular)* #(#per_all_remove)* inner_mask &= all_in; }
+        quote! { let mut all_in: u128 = u128::MAX; #(#per_all_regular)* inner_mask &= all_in; }
     };
 
     let inner_none = if none_types.is_empty() { quote!() } else {
@@ -356,7 +330,7 @@ pub fn system(input: TokenStream) -> TokenStream {
                                     mask &= !(1u128 << ii);
                                 }
                                 inner.presence_mask &= !range_mask;
-                                inner.absence_mask |= range_mask;
+                                inner.absence_mask &= !range_mask;
                                 if inner.absence_mask != u128::MAX {
                                     middle.absence_mask &= !(1u128 << mi);
                                 }
@@ -376,7 +350,7 @@ pub fn system(input: TokenStream) -> TokenStream {
                             if ((middle.presence_mask >> mi) & 1) != 0 {
                                 let inner = unsafe { middle.data[mi as usize].assume_init_mut() };
                                 inner.presence_mask &= !range_mask;
-                                inner.absence_mask |= range_mask;
+                                inner.absence_mask &= !range_mask;
                                 if inner.absence_mask != u128::MAX {
                                     middle.absence_mask &= !(1u128 << mi);
                                 }
