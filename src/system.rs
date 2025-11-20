@@ -72,4 +72,32 @@ mod tests {
         assert_eq!(destroyed.borrow().len(), 0);
         assert_eq!(ents.borrow().len(), 2);
     }
+
+    #[test]
+    fn destroy_system_removes_all_entities() {
+        let mut world = World::new();
+
+        let ents = world.get::<Entity>();
+        let destroyed = world.get::<Destroyed>();
+
+        let e0 = *ents.borrow_mut().spawn();
+        let e1 = *ents.borrow_mut().spawn();
+        let e2 = *ents.borrow_mut().spawn();
+
+        assert_eq!(ents.borrow().len(), 3);
+        assert_eq!(destroyed.borrow().len(), 0);
+
+        // Mark all entities as destroyed
+        destroyed.borrow_mut().set(e0.index(), &Destroyed{});
+        destroyed.borrow_mut().set(e1.index(), &Destroyed{});
+        destroyed.borrow_mut().set(e2.index(), &Destroyed{});
+
+        assert_eq!(destroyed.borrow().len(), 3);
+
+        world.run::<DestroySystem>();
+
+        // All entities and destroyed tags should be removed
+        assert_eq!(destroyed.borrow().len(), 0);
+        assert_eq!(ents.borrow().len(), 0);
+    }
 }
