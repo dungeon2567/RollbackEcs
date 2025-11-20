@@ -5,7 +5,7 @@ use crate::tick::Tick;
 pub struct Block<T> {
     pub presence_mask: u128,
     pub absence_mask: u128,
-    pub change_mask: u128,
+    pub changed_mask: u128,
     pub data: [MaybeUninit<T>; 128]
 }
 
@@ -21,7 +21,7 @@ impl<T> Block<T> {
         Block {
             presence_mask: 0,
             absence_mask: 0,
-            change_mask: 0,
+            changed_mask: 0,
             data: std::array::from_fn(|_| std::mem::MaybeUninit::uninit())
         }
     }

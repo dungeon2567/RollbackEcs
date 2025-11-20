@@ -31,6 +31,7 @@ impl<T> Storage<T> {
 
             // 2b. Iterate partially occupied inner blocks
             let mut partial_middle = middle.presence_mask & !middle.absence_mask;
+            
             while partial_middle != 0 {
                 let mi = partial_middle.trailing_zeros();
                 let inner = unsafe { middle.data[mi as usize].assume_init_ref() };

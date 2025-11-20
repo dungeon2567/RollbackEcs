@@ -1,10 +1,12 @@
+use std::any::TypeId;
 use rollback_macros::system as system;
 
 // Query trait not used in inlined macro run
 
-use crate::component::Destroyed;
+use crate::component::{Component, Destroyed};
 use crate::entity::Entity;
-
+use crate::scheduler::pipeline::PipelineStage;
+use crate::world::World;
 
 system! {
     DestroySystem {
@@ -23,7 +25,10 @@ system! {
         }
     }
 }
-
+pub struct ChangeCleanupSystem<T: Component>
+{
+    pub storage: std::rc::Rc<std::cell::RefCell<crate::storage::storage::Storage<T>>>,
+}
 
 #[cfg(test)]
 mod tests {

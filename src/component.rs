@@ -12,12 +12,6 @@ pub fn next_id() -> usize {
 pub trait Component: Any + Default where Self: Sized {
     fn type_index() -> usize;
 }
-
-pub struct ComponentInfo {
-    pub name: &'static str,
-    pub id: OnceLock<usize>,
-}
-
 pub trait Tag: Any where Self: Sized{
 
 }
